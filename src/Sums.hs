@@ -3,6 +3,7 @@
 {-# LANGUAGE EmptyCase #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -26,7 +27,7 @@
 module Sums
  ( -- * Sum types
    Sum(This, That)
- , Put
+ , absurd
  , put
  , get
  , _Sum
@@ -35,14 +36,15 @@ module Sums
 --  , Unmatch
 --  , unmatch
  , Cases
- , cases
- , foo
+ , singleCase
  , (\\)
- , absurd
- , Unique
-   -- ** Overrides
- , Override
  , override
+   -- ** Misc
+ , Get
+ , Put
+ , Unique
+ , Override
+ , MkCases
  ) where
 
 import Data.Profunctor (dimap, Choice(right'))
@@ -126,7 +128,7 @@ import Unsafe.Coerce (unsafeCoerce)
 --
 -- @
 -- showCases1 :: 'Cases' '[['Int'], 'Bool'] 'String'
--- showCases1 = 'cases' \\ showList1 \\ showBool1
+-- showCases1 = showList1 \\\\ showBool1
 -- @
 --
 -- @'Cases' '[['Int'], 'Bool'] 'String'@ is not a function, but it can be easily
@@ -142,14 +144,13 @@ import Unsafe.Coerce (unsafeCoerce)
 -- Most of the times, however, you'd
 
 data Cases :: [*] -> * -> * where
-  Case :: Unique as a => Cases as r -> (a -> r) -> Cases (a ': as) r
+  Case :: Unique as a => (a -> r) -> Cases as r -> Cases (a ': as) r
   Absurd :: Cases '[] r
-  -- Match :: (Sum (a ': as) -> r) -> Cases (a ': as) r
 
 instance Functor (Cases as) where
   {-# INLINE fmap #-}
   fmap f = \case
-    Case cs g -> Case (fmap f cs) (f . g)
+    Case g cs -> Case (f . g) (fmap f cs)
     Absurd -> Absurd
     -- Match g -> Match (f . g)
 
@@ -185,7 +186,7 @@ get = get'
 
 --------------------------------------------------------------------------------
 
-type Put as a = Put' as a
+type Put = Put'
 class Put' (as :: [*]) (a :: *) where
   put' :: a -> Sum as
 instance Unique as a => Put' (a ': as) a where
@@ -203,7 +204,7 @@ put = put'
 
 --------------------------------------------------------------------------------
 
-_Sum :: (Get as a, Put bs b, Exclude as a ~ Exclude bs a)
+_Sum :: (Get as a, Put bs b, Exclude as a ~ Exclude bs b)
      => Prism (Sum as) (Sum bs) a b
 _Sum = prism put' $ \s -> case get' s of
    Just a  -> Right a
@@ -212,15 +213,6 @@ _Sum = prism put' $ \s -> case get' s of
 {-# INLINE _Sum #-}
 
 --------------------------------------------------------------------------------
-
-cases :: Cases '[] r
-cases = Absurd
-{-# INLINE cases #-}
-
-infixl 5 \\
-(\\) :: Unique as a => Cases as r -> (a -> r) -> Cases (a ': as) r
-(\\) = Case
-{-# INLINE (\\) #-}
 
 -- type Unmatch = Unmatch'
 -- class Unmatch' (as :: [*]) where
@@ -247,6 +239,82 @@ infixl 5 \\
 
 --------------------------------------------------------------------------------
 
+class MkCases' a x as r | as a r -> x, as x r -> a, a x -> as, x -> r where
+  mkCases :: (a -> r) -> x -> Cases as r
+instance Unique '[b] a => MkCases' a (b -> r) '[a, b] r where
+  mkCases fa fb = Case fa (Case fb Absurd)
+  {-# INLINE mkCases #-}
+instance Unique (a1 ': a2 ': as) a
+  => MkCases' a (Cases (a1 ': a2 ': as) r) (a ': a1 ': a2 ': as) r where
+  mkCases fa cas = Case fa cas
+  {-# INLINE mkCases #-}
+
+type MkCases = MkCases'
+
+infixr 5 \\
+-- |
+-- @
+-- (\\\\) :: (a -> r) -> 'Cases' as -> 'Cases' (a ': as) r
+-- (\\\\) :: (a -> r) -> (b -> r) -> 'Cases' '[a, b]   r
+-- @
+--
+-- (\\\\) is intended to be used as an infix operator combining multiple @forall
+-- x. x -> r@ functions into a single @'Cases' xs r@.
+--
+-- Note that in all of the following examples, the final 'Cases' type is
+-- actually inferred by the compiler. We only give the explicit type signature
+-- as an example.
+--
+-- @
+-- (\\case True -> "a"
+--        False -> "b" ) \\\\
+-- (\\case () -> "c")
+--     :: 'Cases' '[ 'Bool', ()] 'String'
+-- @
+--
+-- Adding one more case:
+--
+-- @
+-- (\\case True -> "a"
+--        False -> "b" ) \\\\
+-- (\\case () -> "c" ) \\\\
+-- (\\case n -> show (n :: 'Int'))
+--     :: 'Cases' '[ 'Bool', (), 'Int'] 'String'
+-- @
+--
+-- Notice that we can't have 'Cases' listing the same type twice. For example,
+-- the following does not compile. Instead, you get an error saying @() already is a
+-- member of '[()]@.
+--
+--
+-- @
+-- (\\case () -> "c" ) \\\\
+-- (\\case () -> "d" )
+--     :: 'Cases' '[ (), ()] 'String'           -- Does not compile
+-- @
+--
+-- We use and recommend the @\\case@ syntax from GHC's @LambdaCase@ extension
+-- because it improves the pattern matching, as exemplified above, but it is not
+-- necessary.
+--
+-- We can leave some of the cases polymorphic as well. However, in that case,
+-- we'll have to give an explicit type signature adding the necessary
+-- constraints, and we'll also need to give an explicit type to the 'Sum' we
+-- will eventually 'match' against.
+--
+-- @
+-- 'show' \\\\ 'const' :: ('Show' a, 'Unique' '[ 'String'] a) => 'Cases' '[a, 'String'] 'String'
+-- @
+(\\) :: MkCases a x as r => (a -> r) -> x -> Cases as r
+(\\) fa x = mkCases fa x
+{-# INLINE (\\) #-}
+
+singleCase :: (a -> r) -> Cases '[a] r
+singleCase fa = Case fa Absurd
+{-# INLINE singleCase #-}
+
+--------------------------------------------------------------------------------
+
 absurd :: Sum '[] -> r
 absurd = \case{}
 {-# INLINE absurd #-}
@@ -261,12 +329,13 @@ absurd = \case{}
 -- 'unmatch' . 'match' = id
 -- @
 match :: Cases as r -> Sum as -> r
-match (Case cs f) = \case
+match (Case f cs) = \case
   This a  -> f a
   That as -> match cs as
 match Absurd = absurd
 -- match (Match f) = f
 {-# INLINE match #-}
+
 --------------------------------------------------------------------------------
 
 type Override = Override'
@@ -276,11 +345,11 @@ instance Override' '[] a where
   override' _ Absurd = Absurd
   {-# INLINE override' #-}
 instance Unique as a => Override' (a ': as) a where
-  override' f (Case cs _) = Case cs f
+  override' f (Case _ cs) = Case f cs
   -- override' f (Match g) = Match (\s -> maybe (g s) f (get s))
   {-# INLINE override' #-}
 instance {-# OVERLAPPABLE #-} (Put as a, Override' as a) => Override' (b ': as) a where
-  override' f (Case cs g) = Case (override' f cs) g
+  override' f (Case g cs) = Case g (override' f cs)
   -- override' f (Match g) = Match (\s -> maybe (g s) f (get s))
   {-# INLINE override' #-}
 
@@ -312,7 +381,7 @@ instance Unique'' xs xs x => Unique' xs x
 type family Unique'' (xs0 :: [k]) (xs :: [k]) (x :: k) :: Constraint where
   Unique'' xs0 (x ': xs) x =
     GHC.TypeError
-      ('GHC.ShowType x 'GHC.:<>: 'GHC.Text " is already a member of "
+      ('GHC.ShowType x 'GHC.:<>: 'GHC.Text " already is a member of "
        'GHC.:<>: 'GHC.ShowType xs0)
   Unique'' xs0 (_ ': xs) x = Unique'' xs0 xs x
   Unique'' xs0 '[] x = ()
@@ -321,20 +390,7 @@ type family Exclude (xs :: [k]) (x :: k) :: [k] where
   Exclude (x ': xs) x = Exclude xs x
   Exclude '[] x = '[]
 
-class Member (xs :: [k]) (x :: k)
-instance Member (x ': xs) x
-instance {-# OVERLAPPABLE #-} Member xs x => Member (y ': xs) x
-
 type family All (c :: k -> Constraint) (xs :: [k]) :: Constraint where
   All c (x ': xs) = (c x, All c xs)
   All c '[] = ()
-
-infixr 5 ++
--- | Type-level list conccatenation.
-type family (++) (xs :: [k]) (ys :: [k]) :: [k] where
-  '[] ++ ys = ys
-  (x ': xs) ++ ys = x ': xs ++ ys
-
--- data Dict :: Constraint -> * where
-  -- Dict :: a => Dict a
 
