@@ -1,0 +1,4 @@
+documentation: True
+tests: True
+packages:
+  sap/

@@ -1,0 +1,8 @@
+*~
+cabal.project.local
+*/dist/*
+dist-newstyle/*
+.ghci
+result
+.*.sw[a-p]
+tags
